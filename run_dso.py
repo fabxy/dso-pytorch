@@ -1,5 +1,3 @@
-"""XYZ"""
-
 import os
 import numpy as np
 
@@ -125,7 +123,9 @@ class Constraints(object):
         self.min_len = min_len
         self.max_len = max_len
                
-    def __call__(self, pred, expr, pool):
+    def __call__(self, probs, expr, pool):
+
+        constr = torch.ones_like(probs)
 
         if self.min_len is not None:
 
@@ -134,7 +134,7 @@ class Constraints(object):
             if open_syms == 1 and len(expr) < self.min_len:
 
                 for s, sym in enumerate(pool):
-                    if sym.arity == 0: pred[s] = 0.0
+                    if sym.arity == 0: constr[s] = 0.0
 
         if self.max_len is not None:
 
@@ -143,19 +143,77 @@ class Constraints(object):
             max_arity = self.max_len - len(expr) - open_syms
 
             for s, sym in enumerate(pool):
-                if sym.arity > max_arity: pred[s] = 0.0
+                if sym.arity > max_arity: constr[s] = 0.0
 
-        pred = pred / pred.sum()
+        # apply constraints
+        probs = probs * constr
+
+        # normalize
+        probs = probs / probs.sum()
                 
-        return pred
+        return probs
 
 
-# class Reward(object):
-#     """XYZ"""
+class Reward(object):
+    """XYZ"""
 
-#     def __init__(self, objective="NRMSE"):
+    def __init__(self, in_data, target_data, objective="NRMSE", in_vars=None, target_var=None):
 
-#         self.objective = objective
+        # get variable names
+        if in_vars is None:
+            self.in_vars = [f"x{i}" for i in range(in_data.shape[1])]
+        else:
+            self.in_vars = in_vars
+
+        if target_var is None:
+            self.target_var = "y"
+        else:
+            self.target_var
+
+        # create data dict
+        self.data = {self.in_vars[i]: in_data[:,i] for i in range(in_data.shape[1])}
+        self.data[self.target_var] = target_data
+
+        # get objective
+        self.objective = objective
+
+    def __call__(self, batch):
+        if isinstance(batch, Expression):
+            return self.evaluate(batch)
+        else:
+            return [self.evaluate(expr) for expr in batch]
+
+    def evaluate(self, expr):
+
+        if self.objective == "NRMSE":
+            eval_fun = f"1 / np.std({self.target_var}) * np.sqrt(np.mean(({expr}-{self.target_var})**2))"
+        else:
+            eval_fun = self.objective
+
+        reward = eval(eval_fun, {'np': np}, self.data)
+        reward = 1 / (1 + reward)
+
+        return reward
+
+
+class PolicyGradient():
+    """XYZ"""
+
+    def __init__(self, algorithm="REINFORCE"):
+
+        self.algorithm = algorithm
+
+    def __call__(self, batch, rewards):
+        return self.evaluate(batch, rewards)
+
+    def evaluate(self, batch, rewards):
+
+        if self.algorithm == "REINFORCE":
+            likelihoods = torch.cat([expr.likelihood for expr in batch])
+            rewards = torch.Tensor(rewards)
+            return (-1 * rewards * torch.log(likelihoods)).mean()
+        else:
+            raise NotImplementedError()
             
 
 class DSO(nn.Module):
@@ -178,19 +236,19 @@ class DSO(nn.Module):
           
     def get_input(self, par_sym=None, sib_sym=None):
 
-        in_data = torch.zeros(self.in_size)                     # TODO: explicit empty symbol encoding?
+        in_encoding = torch.zeros(self.in_size)                     # TODO: explicit empty symbol encoding?
 
         if par_sym is not None:
-            in_data[self.pool.index(par_sym)] = 1.0
+            in_encoding[self.pool.index(par_sym)] = 1.0
 
         if sib_sym is not None:
-            in_data[len(self.pool) + self.pool.index(sib_sym)] = 1.0
+            in_encoding[len(self.pool) + self.pool.index(sib_sym)] = 1.0
 
-        return in_data
+        return in_encoding
 
-    def get_probabilities(self, in_data, state=None):
+    def get_probabilities(self, in_encoding, state=None):
 
-        h, c = self.rnn(in_data, state)
+        h, c = self.rnn(in_encoding, state)
         out = self.linear(h)
         probs = F.softmax(out, dim=0)
 
@@ -209,8 +267,8 @@ class DSO(nn.Module):
         state = None
 
         while open_syms:
-            in_data = self.get_input(par_sym, sib_sym)
-            probs, state = self.get_probabilities(in_data, state)
+            in_encoding = self.get_input(par_sym, sib_sym)
+            probs, state = self.get_probabilities(in_encoding, state)
 
             if self.constraints:
                 probs = self.constraints(probs, expr, self.pool)
@@ -228,25 +286,25 @@ if __name__ == "__main__":
     torch.manual_seed(0)
 
     # define hyperparameters
-    hid_size = 8
+    hid_size = 32
     min_len = 4
     max_len = 20
 
-    epochs = 5
-    batch_size = 2
+    epochs = 50
+    batch_size = 200
+    learning_rate = 1e-3
 
     # define symbol pool
     plus = Symbol("+", 2)
     minus = Symbol("-", 2)
     times = Symbol("*", 2)
 
-    sin = Symbol("sin", 1)
-    cos = Symbol("cos", 1)
+    sin = Symbol("np.sin", 1)
+    cos = Symbol("np.cos", 1)
 
-    x_sym = Symbol("x", 0)
-    y_sym = Symbol("y", 0)
+    x_sym = Symbol("x0", 0)
 
-    pool = [plus, minus, times, sin, cos, x_sym, y_sym]
+    pool = [plus, minus, times, sin, cos, x_sym]
 
     # define constraints
     constraints = Constraints(min_len=min_len, max_len=max_len)
@@ -262,32 +320,48 @@ if __name__ == "__main__":
 
     data = np.loadtxt(os.path.join(data_path, f"{data_name}.{data_ext}"), delimiter=',')
 
-    X_train = torch.Tensor(data[:,:-1])
-    y_train = torch.Tensor(data[:,-1])
-
-    # define optimizer
+    X_train = data[:,:-1]
+    y_train = data[:,-1]
 
     # define reward function
+    reward = Reward(X_train, y_train, objective="NRMSE")
 
-    # // RNN architectural hyperparameters.
-    # "cell" : "lstm",
-    # "num_layers" : 1,
-    # "num_units" : 32,
-    # "initializer" : "zeros",
+    # define policy gradient
+    policy_grad = PolicyGradient("REINFORCE")
 
-    # // Optimizer hyperparameters.
-    # "learning_rate" : 0.001,
-    # "optimizer" : "adam",
+    # define optimizer
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # // Entropy regularizer hyperparameters.
     # "entropy_weight" : 0.005,
     # "entropy_gamma" : 1.0,
 
     # run training
+    losses = []
+    max_reward = 0.0
+    best_expr = None
     for epoch in range(epochs):
+
+        optimizer.zero_grad()
 
         batch = [model() for _ in range(batch_size)]
 
-        for expr in batch:
-            print(expr.print_symbols())
-            print(expr)
+        rewards = reward(batch)
+
+        loss = policy_grad(batch, rewards)
+
+        loss.backward()
+
+        optimizer.step()
+
+        losses.append(loss.item())
+        
+        print(loss.item())
+
+        r = np.max(rewards)
+        if r > max_reward:
+            max_reward = r
+            best_expr = batch[rewards.index(r)]
+
+    print(max_reward)
+    print(best_expr)
