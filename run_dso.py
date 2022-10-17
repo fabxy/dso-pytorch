@@ -54,6 +54,32 @@ class Expression(object):
     def __len__(self):
         return len(self.symbols)
 
+    def __str__(self):
+        return self.translate(self.symbols)[0]
+
+    def print_symbols(self):
+        return [str(s) for s in self.symbols]
+
+    def translate(self, syms):
+
+        sym = syms[0]
+        syms = syms[1:]
+
+        mid = sym.name
+        ar = sym.arity
+
+        if ar == 0:
+            return mid, syms
+        elif ar == 1:
+            right, syms = self.translate(syms)
+            return f"{mid}({right})", syms
+        elif ar == 2:
+            left, syms = self.translate(syms)
+            right, syms = self.translate(syms)
+            return f"({left}{mid}{right})", syms
+        else:
+            raise NotImplementedError()
+
     def add(self, sym, prob):
 
         self.symbols.append(sym)
@@ -88,18 +114,27 @@ class Expression(object):
                 self.sib_sym = self.symbols[idx+1]
             
     def get_status(self):
-
         return self.open_syms, self.par_sym, self.sib_sym
 
 
 class Constraints(object):
     """XYZ"""
 
-    def __init__(self, max_len=None):
+    def __init__(self, min_len=None, max_len=None):
 
+        self.min_len = min_len
         self.max_len = max_len
                
     def __call__(self, pred, expr, pool):
+
+        if self.min_len is not None:
+
+            open_syms, _, _ = expr.get_status()
+
+            if open_syms == 1 and len(expr) < self.min_len:
+
+                for s, sym in enumerate(pool):
+                    if sym.arity == 0: pred[s] = 0.0
 
         if self.max_len is not None:
 
@@ -170,17 +205,10 @@ class DSO(nn.Module):
     def forward(self):
 
         expr = Expression()
+        open_syms, par_sym, sib_sym = expr.get_status()
+        state = None
 
-        # get first symbol
-        in_data = self.get_input()
-        probs, state = self.get_probabilities(in_data)
-
-        sym, prob = self.get_symbol(probs)
-        open_syms, par_sym, sib_sym = expr.add(sym, prob)
-
-        # get remaining symbols
         while open_syms:
-
             in_data = self.get_input(par_sym, sib_sym)
             probs, state = self.get_probabilities(in_data, state)
 
@@ -197,27 +225,31 @@ class DSO(nn.Module):
 
 if __name__ == "__main__":
 
-    torch.manual_seed(1)
+    torch.manual_seed(0)
 
     # define hyperparameters
     hid_size = 8
+    min_len = 4
     max_len = 20
 
-    epochs = 10
-    batch_size = 20
+    epochs = 5
+    batch_size = 2
 
     # define symbol pool
     plus = Symbol("+", 2)
     minus = Symbol("-", 2)
     times = Symbol("*", 2)
 
+    sin = Symbol("sin", 1)
+    cos = Symbol("cos", 1)
+
     x_sym = Symbol("x", 0)
     y_sym = Symbol("y", 0)
 
-    pool = [plus, minus, times, x_sym, y_sym]
+    pool = [plus, minus, times, sin, cos, x_sym, y_sym]
 
     # define constraints
-    constraints = Constraints(max_len=max_len)
+    constraints = Constraints(min_len=min_len, max_len=max_len)
 
     # create model
     # TODO: hyperparam dict, loading, saving
@@ -237,10 +269,25 @@ if __name__ == "__main__":
 
     # define reward function
 
+    # // RNN architectural hyperparameters.
+    # "cell" : "lstm",
+    # "num_layers" : 1,
+    # "num_units" : 32,
+    # "initializer" : "zeros",
+
+    # // Optimizer hyperparameters.
+    # "learning_rate" : 0.001,
+    # "optimizer" : "adam",
+
+    # // Entropy regularizer hyperparameters.
+    # "entropy_weight" : 0.005,
+    # "entropy_gamma" : 1.0,
+
     # run training
     for epoch in range(epochs):
 
         batch = [model() for _ in range(batch_size)]
 
         for expr in batch:
-            print([str(s) for s in expr.symbols])
+            print(expr.print_symbols())
+            print(expr)
