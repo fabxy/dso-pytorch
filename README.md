@@ -12,16 +12,16 @@ This is WORK-IN-PROGRESS until stated otherwise.
 
 Open TODOs:
 
-- [] Implement different policy gradients
+* Implement different policy gradients
 
-- [] Sample batches in parallel
+* Sample batches in parallel
 
-- [] Explore entropy regularization further
+* Explore entropy regularization further
 
-- [] Implement more constraints
+* Implement more constraints
 
-- [] Optimize constants
+* Optimize constants
 
-- [] Improve one-hot-encoding (parent nodes, empty symbol)
+* Improve one-hot-encoding (parent nodes, empty symbol)
 
-- [] Train on GPU
+* Train on GPU
