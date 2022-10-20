@@ -8,21 +8,6 @@ import torch.optim as optim
 
 from tqdm import trange
 
-# TODO:
-# - Define:
-# - Symbols
-# - Expressions
-# - Model (policy)
-# - Constraints
-# - Reward
-# - Optimize constants
-# - Evaluation via strings or functions?
-# - Policy gradient
-# - Entropy
-# - Get data
-# - Device
-
-
 class Symbol(object):
     """XYZ"""
 
@@ -382,10 +367,6 @@ if __name__ == "__main__":
 
     # define optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    # // Entropy regularizer hyperparameters.
-    # "entropy_weight" : 0.005,
-    # "entropy_gamma" : 1.0,
 
     # run training
     losses = []

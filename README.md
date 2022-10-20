@@ -9,3 +9,19 @@ We don't like TensorFlow and we don't want to read a lot of code.
 This project attempts to implement the above stated paper in PyTorch.
 
 This is WORK-IN-PROGRESS until stated otherwise.
+
+Open TODOs:
+
+- [] Implement different policy gradients
+
+- [] Sample batches in parallel
+
+- [] Explore entropy regularization further
+
+- [] Implement more constraints
+
+- [] Optimize constants
+
+- [] Improve one-hot-encoding (parent nodes, empty symbol)
+
+- [] Train on GPU
