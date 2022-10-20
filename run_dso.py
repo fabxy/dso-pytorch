@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+from tqdm import trange
 
 # TODO:
 # - Define:
@@ -25,10 +26,11 @@ import torch.optim as optim
 class Symbol(object):
     """XYZ"""
 
-    def __init__(self, name, arity):
+    def __init__(self, name, arity, function=None):
 
         self.name = name
         self.arity = arity
+        self.fn = function
 
     def __str__(self):
         return self.name
@@ -41,6 +43,7 @@ class Expression(object):
         
         self.symbols = []
         self.likelihood = 1.0
+        self.entropy = 0.0
 
         self.open_syms = 1
         self.par_sym = None
@@ -54,6 +57,9 @@ class Expression(object):
 
     def __str__(self):
         return self.translate(self.symbols)[0]
+
+    def __call__(self, data):
+        return self.evaluate(self.symbols, data)[0]
 
     def print_symbols(self):
         return [str(s) for s in self.symbols]
@@ -78,10 +84,31 @@ class Expression(object):
         else:
             raise NotImplementedError()
 
-    def add(self, sym, prob):
+    def evaluate(self, syms, data):
+
+        sym = syms[0]
+        syms = syms[1:]
+
+        ar = sym.arity
+        fn = sym.fn
+
+        if ar == 0:
+            return data[sym.name], syms
+        elif ar == 1:
+            arg1, syms = self.evaluate(syms, data)
+            return fn(arg1), syms
+        elif ar == 2:
+            arg1, syms = self.evaluate(syms, data)
+            arg2, syms = self.evaluate(syms, data)
+            return fn(arg1, arg2), syms
+        else:
+            raise NotImplementedError()
+
+    def add(self, sym, prob, step_entropy):
 
         self.symbols.append(sym)
         self.likelihood *= prob
+        self.entropy += step_entropy
         
         self.open_syms += sym.arity - 1
         self.update_status()
@@ -157,7 +184,7 @@ class Constraints(object):
 class Reward(object):
     """XYZ"""
 
-    def __init__(self, in_data, target_data, objective="NRMSE", in_vars=None, target_var=None):
+    def __init__(self, in_data, target_data, objective="NRMSE", in_vars=None, target_var=None, eval_type="str"):
 
         # get variable names
         if in_vars is None:
@@ -174,8 +201,9 @@ class Reward(object):
         self.data = {self.in_vars[i]: in_data[:,i] for i in range(in_data.shape[1])}
         self.data[self.target_var] = target_data
 
-        # get objective
+        # get objective and set evaluation type
         self.objective = objective
+        self.eval_type = eval_type
 
     def __call__(self, batch):
         if isinstance(batch, Expression):
@@ -185,13 +213,21 @@ class Reward(object):
 
     def evaluate(self, expr):
 
-        if self.objective == "NRMSE":
-            eval_fun = f"1 / np.std({self.target_var}) * np.sqrt(np.mean(({expr}-{self.target_var})**2))"
-        else:
-            eval_fun = self.objective
+        if self.eval_type == "str":
+            if self.objective == "NRMSE":
+                eval_fun = f"1 / np.std({self.target_var}) * np.sqrt(np.mean(({expr}-{self.target_var})**2))"
+            else:
+                eval_fun = self.objective
 
-        reward = eval(eval_fun, {'np': np}, self.data)
-        reward = 1 / (1 + reward)
+            reward = eval(eval_fun, {'np': np}, self.data)
+            reward = 1 / (1 + reward)
+
+        else:
+            if self.objective == "NRMSE":
+                reward = 1 / np.std(self.data[self.target_var]) * np.sqrt(np.mean((expr(self.data) - self.data[self.target_var])**2))
+                reward = 1 / (1 + reward)
+            else:
+                raise NotImplementedError()
 
         return reward
 
@@ -199,9 +235,10 @@ class Reward(object):
 class PolicyGradient():
     """XYZ"""
 
-    def __init__(self, algorithm="REINFORCE"):
+    def __init__(self, algorithm="REINFORCE", entropy_lambda=None):
 
         self.algorithm = algorithm
+        self.entropy_lambda = entropy_lambda
 
     def __call__(self, batch, rewards):
         return self.evaluate(batch, rewards)
@@ -209,12 +246,18 @@ class PolicyGradient():
     def evaluate(self, batch, rewards):
 
         if self.algorithm == "REINFORCE":
-            likelihoods = torch.cat([expr.likelihood for expr in batch])
+            likelihoods = torch.cat([expr.likelihood.unsqueeze(0) for expr in batch])
             rewards = torch.Tensor(rewards)
-            return (-1 * rewards * torch.log(likelihoods)).mean()
+            loss = -1 * (rewards * torch.log(likelihoods)).mean()
         else:
             raise NotImplementedError()
-            
+
+        if self.entropy_lambda:
+            entropies = torch.cat([expr.entropy.unsqueeze(0) for expr in batch])                 # TODO: entropy of expression as sum or mean of individual entropies?
+            loss += -1 * self.entropy_lambda * entropies.mean()
+
+        return loss
+
 
 class DSO(nn.Module):
     """XYZ"""
@@ -256,9 +299,15 @@ class DSO(nn.Module):
 
     def get_symbol(self, probs):
         
-        sym_idx = torch.multinomial(probs, 1)
+        sym_idx = torch.multinomial(probs, 1)[0]
 
         return self.pool[sym_idx], probs[sym_idx]
+
+    def get_entropy(self, probs):
+
+        log_safety = (probs.detach() == 0.0) * 1.0
+
+        return -1 * (probs * torch.log(probs + log_safety)).sum()
 
     def forward(self):
 
@@ -274,7 +323,8 @@ class DSO(nn.Module):
                 probs = self.constraints(probs, expr, self.pool)
             
             sym, prob = self.get_symbol(probs)
-            open_syms, par_sym, sib_sym = expr.add(sym, prob)
+            step_entropy = self.get_entropy(probs)
+            open_syms, par_sym, sib_sym = expr.add(sym, prob, step_entropy)
 
         return expr
 
@@ -293,14 +343,15 @@ if __name__ == "__main__":
     epochs = 50
     batch_size = 200
     learning_rate = 1e-3
+    entropy_lambda = 5e-3
 
     # define symbol pool
-    plus = Symbol("+", 2)
-    minus = Symbol("-", 2)
-    times = Symbol("*", 2)
+    plus = Symbol("+", 2, function=np.add)
+    minus = Symbol("-", 2, function=np.subtract)
+    times = Symbol("*", 2, function=np.multiply)
 
-    sin = Symbol("np.sin", 1)
-    cos = Symbol("np.cos", 1)
+    sin = Symbol("np.sin", 1, function=np.sin)
+    cos = Symbol("np.cos", 1, function=np.cos)
 
     x_sym = Symbol("x0", 0)
 
@@ -324,10 +375,10 @@ if __name__ == "__main__":
     y_train = data[:,-1]
 
     # define reward function
-    reward = Reward(X_train, y_train, objective="NRMSE")
+    reward = Reward(X_train, y_train, objective="NRMSE", eval_type="fn")
 
     # define policy gradient
-    policy_grad = PolicyGradient("REINFORCE")
+    policy_grad = PolicyGradient("REINFORCE", entropy_lambda=entropy_lambda)
 
     # define optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -340,7 +391,9 @@ if __name__ == "__main__":
     losses = []
     max_reward = 0.0
     best_expr = None
-    for epoch in range(epochs):
+
+    t = trange(epochs, desc="Epoch")
+    for epoch in t:
 
         optimizer.zero_grad()
 
@@ -356,7 +409,7 @@ if __name__ == "__main__":
 
         losses.append(loss.item())
         
-        print(loss.item())
+        t.set_postfix({"loss": f"{loss.item():.2f}"})
 
         r = np.max(rewards)
         if r > max_reward:
